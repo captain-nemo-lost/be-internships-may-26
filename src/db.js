@@ -5,6 +5,8 @@ import path from 'path';
 const dbPath = process.env.DATABASE_URL || './data/signals.db';
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
+db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
 
 // schema
 db.exec(`
@@ -17,6 +19,12 @@ CREATE TABLE IF NOT EXISTS signals (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_user_created ON signals(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  user_id TEXT PRIMARY KEY,
+  count INTEGER NOT NULL,
+  window_start INTEGER NOT NULL
+);
 `);
 
 // failure simulation
@@ -51,4 +59,17 @@ export function listSignals(userId, limit) {
     'SELECT id, user_id as userId, type, payload, idempotency_key as idempotencyKey, created_at as createdAt FROM signals WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
   );
   return stmt.all(userId, limit);
+}
+
+export function checkAndConsumeRateLimit(userId, rateLimit, windowMs, nowMs) {
+  const wStart = nowMs - windowMs;
+  const stmt = db.prepare(`
+    INSERT INTO rate_limits (user_id, count, window_start)
+    VALUES (?, 1, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      count = CASE WHEN window_start < ? THEN 1 ELSE count + 1 END,
+      window_start = CASE WHEN window_start < ? THEN ? ELSE window_start END
+    RETURNING count, window_start;
+  `);
+  return stmt.get(userId, nowMs, wStart, wStart, nowMs);
 }

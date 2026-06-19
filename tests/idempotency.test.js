@@ -4,24 +4,30 @@ import { spawn } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import http from 'node:http';
 
-test('idempotency returns same resource for same key', async () => {
-  const proc = spawn('node', ['src/server.js'], { env: { ...process.env, API_KEY: 'k', PORT: '9091' } });
+test('idempotency returns same resource for concurrent requests', async () => {
+  const proc = spawn('node', ['src/server.js'], { env: { ...process.env, API_KEY: 'k', PORT: '9091', RATE_LIMIT_PER_MIN: '100' } });
   await wait(300);
 
-  const base = 'http://localhost:9091';
-  const idem = 'same-key';
+  const base = 'http://127.0.0.1:9091';
+  const idem = 'concurrent-key';
 
-  const a = await postJson(`${base}/v1/signals`, {
-    headers: { 'x-api-key': 'k', 'Idempotency-Key': idem },
-    body: { userId: 'u1', type: 'note', payload: 'x' }
-  });
-  const b = await postJson(`${base}/v1/signals`, {
-    headers: { 'x-api-key': 'k', 'Idempotency-Key': idem },
-    body: { userId: 'u1', type: 'note', payload: 'x' }
-  });
+  const promises = [];
+  for (let i = 0; i < 20; i++) {
+    promises.push(postJson(`${base}/v1/signals`, {
+      headers: { 'x-api-key': 'k', 'Idempotency-Key': idem },
+      body: { userId: 'u1', type: 'note', payload: 'x' }
+    }));
+  }
 
-  assert.equal(a.id, b.id);
-  assert.equal(a.idempotencyKey, b.idempotencyKey);
+  const results = await Promise.all(promises);
+  
+  const first = results[0];
+  assert.ok(first.id, 'Should return an ID');
+  
+  for (const r of results) {
+    assert.equal(r.id, first.id, 'All concurrent requests must return the exact same resource ID');
+    assert.equal(r.idempotencyKey, first.idempotencyKey);
+  }
   proc.kill();
 });
 
